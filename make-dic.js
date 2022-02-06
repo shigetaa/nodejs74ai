@@ -11,11 +11,12 @@ var mongo_client = require('mongodb').MongoClient;
 var fs = require('fs');
 
 // MongoDBに接続
-mongo_client.connect(MONGO_DSN, function (err, db) {
+mongo_client.connect(MONGO_DSN, function (err, client) {
 	// エラーチェック
 	if (err) { console.log("DB error", err); return; }
 	// MongoDBの接続オブジェクトを記憶
-	mongo_db = db;
+	var db = client.db('simple-bot');
+	mongo_db = client;
 
 	// コレクションを取得
 	var collection = db.collection('keywords');
@@ -43,12 +44,12 @@ function insertKeywords(collection) {
 		var rank = parseInt(trim(cells[1]));
 		var pat = trim(cells[2]);
 		var msg = trim(cells[3]);
-		// 挿入 ---- (※6)
+		// 挿入 
 		collection.insert({
 			"key": key, "rank": rank,
 			"pattern": pat, "msg": msg
 		}, function (err, result) {
-			console.log(cnt + ":inserted:", result.ops);
+			console.log(cnt + ":inserted:", result.acknowledged);
 			if (++cnt == dataCount) {
 				console.log("done");
 				mongo_db.close();

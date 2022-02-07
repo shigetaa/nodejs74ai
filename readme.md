@@ -272,10 +272,264 @@ node make-dic.js
 ```
 
 ### 会話ボットとのチャット画面
+会話ボットとチャットする画面を構成するHTMLファイル`chat-client.htl`を以下の様に作成していきます。
+```html
+<!DOCTYPE html>
+<html>
+<meta charset="utf-8">
 
+<body>
+	<h3>Chat Client</h3>
+	<!-- ユーザーのコメント発言フォーム -->
+	<div>
+		コメント:
+		<input id="msg" type="text" value="こんにちは。" size="40">
+		<button id="talk_btn">発言</button>
+	</div>
+	<hr>
+	<!-- ログの表示 -->
+	<div id="log" style="margin:24px;"></div>
+
+	<script type="text/javascript">
+		// サーバーAPIの指定
+		var api = "http://localhost:1337/api?";
+
+		// ボタンをクリックした時のイベントを定義
+		$("#talk_btn").onclick = sendMsg;
+
+		//クリックした時の処理
+		function sendMsg() {
+			// コメントを取得し、パラメーターを組み立てる
+			var msg = $("#msg").value;
+			var url = api + "msg=" + encodeURIComponent(msg);
+			// AjaxでAPIにメッセージを送信
+			$ajax(url, function (xhr, txt) {
+				// サーバーからの返信をログに表示
+				$("#msg").value = "";
+				$("#msg").focus();
+				var e = JSON.parse(txt);
+				// ユーザーの発言
+				var p_you = document.createElement("p");
+				p_you.innerHTML = "あなた &gt; " + msg + "<hr>";
+				// ボットの発言
+				var p_bot = document.createElement("p");
+				p_bot.innerHTML = "ボット &gt; " + e["msg"] + "<hr>";
+				p_bot.style.backgroundColor = "#e0f0ff";
+				// ログに追加
+				var log = $("#log");
+				log.insertBefore(p_you, log.firstChild);
+				log.insertBefore(p_bot, p_you);
+			});
+		}
+
+		// DOMを返す
+		function $(q) { return document.querySelector(q); }
+
+		// Ajax関数
+		function $ajax(url, callback) {
+			var xhr = new XMLHttpRequest();
+			xhr.open('GET', url, true);
+			xhr.onreadystatechange = function () {
+				if (xhr.readyState == 4) { //通信完了
+					if (xhr.status == 200) { //HTTPステータス200
+						callback(xhr, xhr.responseText);
+					}
+				}
+			};
+			xhr.send(''); // 通信を開始
+			return xhr;
+		}
+	</script>
+</body>
+
+</html>
+```
 
 ### 会話ボットサーバー
+Node.js で HTTPサーバー機能を稼働するプログラムを`chat-server.js`として作成していきます。
 
+```javascript
+// チャットサーバーを作る
+//-----------------------------
+// 設定
+var SERVER_PORT = 1337; // サーバーポート
+var FILE_CLIENT = "chat-client.html";
+
+// モジュールの取り込み
+var
+	http = require('http'),
+	URL = require('url'),
+	path = require('path'),
+	fs = require('fs'),
+	bot = require('./chat-server-bot.js');
+
+// サーバーを起動
+var svr = http.createServer(checkRequest);
+svr.listen(SERVER_PORT, function () {
+	console.log("サーバー起動しました");
+	console.log("http://localhost:" + SERVER_PORT);
+});
+
+// サーバーにリクエストがあった時の処理
+function checkRequest(req, res) {
+	var uri = URL.parse(req.url, true);
+	var pathname = uri.pathname;
+	// パス名で処理を分岐
+	if (pathname == "/api") {
+		apiRequest(req, res, uri);
+	} else if (pathname == "/") {
+		res.writeHead(200, { 'Content-Type': 'text/html' });
+		res.end(fs.readFileSync(FILE_CLIENT, "utf-8"));
+	} else {
+		res.writeHead(404, { 'Content-Type': 'text/plain' });
+		res.end("File not found");
+	}
+	console.log(pathname);
+};
+
+// APIへのリクエストを処理 
+function apiRequest(req, res, uri) {
+	msg = uri.query["msg"];
+	bot.getResponse(msg, function (bot_msg) {
+		body = JSON.stringify({ "msg": bot_msg });
+		res.writeHead(200, { 'Content-Type': 'application/json' });
+		res.end(body);
+	});
+};
+```
 
 ### 会話ボットの会話生成モジュール
+会話ボットの会話を生成するモジュール`chat-server-bot.js`とファイル名として作成していきます。
 
+```javascript
+// 会話ボットの応答を生成するモジュール
+//---------------------------------
+
+// MongoDBの設定情報
+var MONGO_DSN = "mongodb://localhost:27017/simple-bot";
+
+// モジュールの取り込み
+var Mecab = require('mecab-lite'),
+	mecab = new Mecab(),
+	mongo_client = require('mongodb').MongoClient;
+
+// MongoDBの接続情報を保持する変数
+var mongo_db = null, keywords_co;
+
+// 外部に getResponse() メソッドを公開
+module.exports = {
+	"getResponse": getResponse
+};
+
+// 会話ボットの応答を返す関数
+function getResponse(msg, callback) {
+	checkDB(function () {
+		var bot = new Bot(msg, callback);
+		bot.talk();
+	});
+}
+
+// MongoDBへ接続
+function checkDB(next_func) {
+	// 既に接続していれば何もしない
+	if (mongo_db) {
+		next_func(); return;
+	}
+
+	// MongoDBに接続
+	mongo_client.connect(MONGO_DSN, function (err, client) {
+		// エラーチェック
+		if (err) { console.log("DB error", err); return; }
+		// 接続情報を記録
+		var db = client.db('simple-bot');
+		mongo_db = client;
+		// コレクションを取得
+		keywords_co = db.collection('keywords');
+		// 次の処理を実行
+		next_func();
+	});
+}
+
+// ボットクラスの定義
+function Bot(msg, callback) {
+	this.callback = callback;
+	this.msg = msg;
+	this.results = [];
+	this.words = [];
+	this.index = 0;
+}
+
+// ボットからの応答を得るメソッド
+Bot.prototype.talk = function () {
+	var self = this;
+	// 形態素解析 
+	mecab.parse(this.msg, function (err, words) {
+		if (err) {
+			self.callback("Error");
+			return;
+		}
+		// 単語を一つずつ確認する
+		self.index = 0;
+		self.words = words;
+		self.nextWord();
+	});
+};
+
+// 各単語を一語ずつ調べるメソッド
+Bot.prototype.nextWord = function () {
+	// 単語を最後まで調べたか確認
+	if (this.index >= this.words.length) {
+		this.response();
+		return;
+	}
+	// データベースを検索
+	var w = this.words[this.index++];
+	// 活用のない単語 - 「頑張ら」なら「頑張る」を利用
+	var org = (w.length >= 7) ? w[7] : w[0];
+	var self = this;
+	keywords_co
+		.find({ key: org })
+		.toArray(function (err, rows) {
+			// データベースに合致する語があったか？
+			if (rows.length == 0) {
+				self.nextWord(); return;
+			}
+			// パターンにマッチするか確認
+			var keys = rows.filter(function (el, index, ary) {
+				if (el.pattern == "*") return true;
+				if (self.msg.indexOf(el.pattern) >= 0) return true;
+				return false;
+			});
+			if (keys.length > 0) {
+				var r = Math.floor(Math.random() * keys.length);
+				var key = keys[r];
+				self.results.push(key.msg);
+			}
+			self.response();
+		});
+};
+
+// 結果を戻す
+Bot.prototype.response = function () {
+	var res = "もう少しかみ砕いて話してください。";
+	if (this.results.length > 0) {
+		res = this.results.join("。");
+	}
+	this.callback(res);
+};
+
+```
+
+### プログラムを実行
+以下のスクリプトを実行して、無事にサーバーが起動しているか確認します。
+
+```bash
+node chat-server.js
+```
+```bash
+サーバー起動しました
+http://localhost:1337
+```
+
+Webブラウザーで`http://localhost:1337`にアクセスして、表示ができていたら
+動作を確認してみてください。
